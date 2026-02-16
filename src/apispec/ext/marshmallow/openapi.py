@@ -288,11 +288,35 @@ class OpenAPIConverter(FieldConverterMixin):
         # Check if all type schemas share a common base class (for allOf composition)
         common_base = self._find_common_base(type_schemas.values())
         if common_base:
-            # Register the base class first to ensure it's in the spec
-            self.resolve_nested_schema(common_base)
+            # Build the discriminator mapping
+            mapping = {}
+            for type_name, type_schema in type_schemas.items():
+                schema_name = self.schema_name_resolver(type_schema)
+                if schema_name:
+                    mapping[type_name] = f"#/components/schemas/{schema_name}"
+
+            # Register the base class with discriminator
+            base_instance = resolve_schema_instance(common_base)
+            base_key = make_schema_key(base_instance)
+
+            # Only add discriminator if not already registered
+            if base_key not in self.refs:
+                self.resolve_nested_schema(common_base)
+                # Add discriminator to the already-registered base schema
+                base_name = self.refs[base_key]
+                if base_name in self.spec.components.schemas:
+                    self.spec.components.schemas[base_name]["discriminator"] = {
+                        "propertyName": type_field,
+                        "mapping": mapping
+                    }
+
             # Process child schemas with allOf composition
             self._register_children_with_allof(type_schemas, common_base)
 
+            # Return a reference to the base class instead of oneOf
+            return self.get_ref_dict(base_instance)
+
+        # Fallback: no common base, use original oneOf approach
         # Build oneOf array with references to each type schema
         # Also build mapping from discriminator values to schema references
         one_of_list = []
