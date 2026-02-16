@@ -285,6 +285,14 @@ class OpenAPIConverter(FieldConverterMixin):
             # Fallback to empty object if no type schemas defined
             return {"type": "object", "properties": {}}
 
+        # Check if all type schemas share a common base class (for allOf composition)
+        common_base = self._find_common_base(type_schemas.values())
+        if common_base:
+            # Register the base class first to ensure it's in the spec
+            self.resolve_nested_schema(common_base)
+            # Process child schemas with allOf composition
+            self._register_children_with_allof(type_schemas, common_base)
+
         # Build oneOf array with references to each type schema
         # Also build mapping from discriminator values to schema references
         one_of_list = []
@@ -309,6 +317,80 @@ class OpenAPIConverter(FieldConverterMixin):
         }
 
         return jsonschema
+
+    def _find_common_base(self, schemas):
+        """Find a common base class shared by all schemas (excluding marshmallow.Schema).
+
+        :param schemas: Iterable of schema classes
+        :return: Common base class or None
+        """
+        schema_instances = [resolve_schema_instance(s) for s in schemas]
+        if not schema_instances:
+            return None
+
+        # Get all base classes for each schema (excluding marshmallow.Schema itself)
+        all_bases = []
+        for schema_inst in schema_instances:
+            bases = [
+                base
+                for base in schema_inst.__class__.__mro__[1:]  # Skip the class itself
+                if issubclass(base, marshmallow.Schema) and base != marshmallow.Schema
+            ]
+            all_bases.append(set(bases))
+
+        if not all_bases:
+            return None
+
+        # Find intersection - bases common to all schemas
+        common_bases = set.intersection(*all_bases) if all_bases else set()
+
+        # Return the most specific common base (first in MRO)
+        if common_bases:
+            # Use the first schema's MRO to determine order
+            for base in schema_instances[0].__class__.__mro__:
+                if base in common_bases:
+                    return base
+        return None
+
+    def _register_children_with_allof(self, type_schemas, base_class):
+        """Register child schemas with allOf composition referencing the base.
+
+        :param type_schemas: Dict of type names to schema classes
+        :param base_class: The common base class
+        """
+        for type_name, type_schema in type_schemas.items():
+            schema_instance = resolve_schema_instance(type_schema)
+            schema_key = make_schema_key(schema_instance)
+
+            # Skip if already registered
+            if schema_key in self.refs:
+                continue
+
+            # Get the schema name
+            name = self.schema_name_resolver(type_schema)
+            if not name:
+                continue  # Can't register without a name
+
+            # Get base schema reference
+            base_instance = resolve_schema_instance(base_class)
+            base_ref = self.get_ref_dict(base_instance)
+
+            # Get fields unique to this child (not in base)
+            base_instance = resolve_schema_instance(base_class)
+            base_fields = set(get_fields(base_instance).keys())
+            child_fields = get_fields(schema_instance)
+            unique_fields = {k: v for k, v in child_fields.items() if k not in base_fields}
+
+            # Build the allOf structure
+            # fields2jsonschema returns a complete schema with type, properties, and required
+            child_specific = self.fields2jsonschema(unique_fields)
+
+            allof_schema = {"allOf": [base_ref, child_specific]}
+
+            # Register this schema manually
+            name = get_unique_schema_name(self.spec.components, name)
+            self.spec.components.schemas[name] = allof_schema
+            self.refs[schema_key] = name
 
     def fields2jsonschema(self, fields, *, partial=None):
         """Return the JSON Schema Object given a mapping between field names and
