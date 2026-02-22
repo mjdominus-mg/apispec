@@ -313,10 +313,6 @@ class OpenAPIConverter(FieldConverterMixin):
             # Process child schemas with allOf composition
             self._register_children_with_allof(type_schemas, common_base)
 
-            # Return a reference to the base class instead of oneOf
-            return self.get_ref_dict(base_instance)
-
-        # Fallback: no common base, use original oneOf approach
         # Build oneOf array with references to each type schema
         # Also build mapping from discriminator values to schema references
         one_of_list = []
